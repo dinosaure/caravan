@@ -1,0 +1,3 @@
+(executable
+ (name caravan)
+ (libraries fmt.tty logs.fmt logs bigstringaf fmt rresult fpath mmap))
