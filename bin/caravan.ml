@@ -69,6 +69,73 @@ module Dllst = struct
       go start
 end
 
+module Bm = struct
+  let occ needle nlen =
+    let occ = Array.make 256 (-1) in
+    for a = 0 to nlen - 2 do
+      occ.(Char.code needle.[a]) <- a
+    done ; occ
+
+  let memcmp v a b l =
+    let pos = ref 0 in
+    while !pos < l && v.[a + !pos] = v.[b + !pos] do incr pos done ;
+    if !pos = l then true else false
+
+  let boyer_moore_needle_match needle nlen portion offset =
+    let va = ref (nlen - offset - portion) in
+    let ignore = ref 0 in
+    if !va < 0 then ( ignore := - !va ; va := 0; ) ;
+    if !va > 0 && needle.[!va - 1] = needle.[nlen - portion - 1]
+    then false else memcmp needle (nlen - portion + !ignore) !va (portion - !ignore)
+
+  let skip needle nlen =
+    let skip = Array.make nlen 0 in
+    for a = 0 to nlen - 1 do
+      let value = ref 0 in
+      while !value < nlen && not (boyer_moore_needle_match needle nlen a !value) do incr value done ;
+      skip.(nlen - a - 1) <- !value
+    done ; skip
+
+  let search { bind; return; } ~get text hpos occ skip needle nlen =
+    let ( >>= ) x f = bind x (function Ok x -> f x | Error err -> return (Error err)) in
+
+    let npos = ref (nlen - 1) in
+    let res = ref hpos in
+
+    let rec go () =
+      get text ~pos:Int64.(add hpos (of_int !npos)) >>= fun chr ->
+      if needle.[!npos] = chr
+      then ( if !npos = 0
+             then return (Ok ())
+             else ( decr npos ; go () ) )
+      else ( res := (-1L) ; return (Ok ()) ) in
+    go () >>= fun () ->
+    (* while needle.[!npos] = get text Int64.(add hpos (of_int !npos))
+       do if !npos = 0 then raise Found ; decr npos done ; res := (-1L) *)
+    get text ~pos:Int64.(add hpos (of_int !npos)) >>= fun chr ->
+    let shift_a = Int64.of_int skip.(!npos) in
+    let shift_b =
+      let x = Char.code chr in
+      Int64.of_int (!npos - occ.(x)) in
+    return (Ok (!res, Int64.add hpos (max shift_a shift_b)))
+
+  let find_all ~pattern:needle =
+    let nlen = String.length needle in
+    let occ = occ needle nlen in
+    let skip = skip needle nlen in
+    fun ({ bind; return; } as s) ~ln ~get text ->
+      let ( >>= ) x f = bind x (function Ok x -> f x | Error err -> return (Error err)) in
+
+      let top = Int64.sub ln (Int64.of_int nlen) in
+      let rec go hpos acc =
+        if hpos > top
+        then return (Ok acc)
+        else search s ~get text hpos occ skip needle nlen >>= function
+          | (-1L), hpos -> go hpos acc
+          | res, hpos -> go hpos (res :: acc) in
+      go 0L []
+end
+
 type zone = { pos : int64; len : int; }
 type invalid_bounds = [ `Invalid_bounds of zone ]
 type invalid_elf = [ `Invalid_ELF ]
@@ -355,6 +422,30 @@ type phdr =
   ; p_filesz : int64
   ; p_memsz : int64
   ; p_align : int64 }
+
+type p_type =
+  | PT_NULL
+  | PT_LOAD
+  | PT_DYNAMIC
+  | PT_INTERP
+  | PT_NOTE
+  | PT_SHLIB
+  | PT_LOPROC
+  | PT_HIPROC
+  | PT_GNU_STACK
+  | PT_OTHER of int32
+
+let p_type_of_phdr phdr = match phdr.p_type with
+  | 0l -> PT_NULL
+  | 1l -> PT_LOAD
+  | 2l -> PT_DYNAMIC
+  | 3l -> PT_INTERP
+  | 4l -> PT_NOTE
+  | 5l -> PT_SHLIB
+  | 0x70000000l -> PT_LOPROC
+  | 0x7fffffffl -> PT_HIPROC
+  | 0x6474e551l -> PT_GNU_STACK
+  | v -> PT_OTHER v
 
 let phdr_equal a b =
   a.p_type = b.p_type
@@ -807,7 +898,262 @@ let pscts_of_offset ~sh_offset t =
 
 module Int64 = struct include Int64 let ( + ) = add let ( - ) = sub let ( * ) = mul let ( / ) = div end
 
+(* XXX FIXUP BSS XXX *)
+
+let fix_nobits_sct t bss psct =
+  let n_bss, shifts = match psct with
+    | Section { shdr= n; _ } ->
+      let _, pscts = List.partition
+          (function
+            | Section { shdr= shdr'; _ } -> n = shdr'
+            | _ -> false)
+          (pscts_of_offset ~sh_offset:bss.sh_offset t |> snd) in
+      n, pscts
+    | _ -> Fmt.invalid_arg "Invalid physical section" in
+  let ssize, rsize = match psct with
+    | Section { shdr= n_bss; _ } ->
+      let size0 =
+        if n_bss > 0
+        then
+          let prev = List.nth t.sht (pred n_bss) in
+          (* XXX(dinosaure): fixup file offset of BSS section and makes it
+             matches the previous section file offset added to the previous
+             size. fixup phdr size. *)
+          let lpad = let open Int64 in bss.sh_offset - (prev.sh_offset + prev.sh_size) in
+          (* XXX(dinosaure): make sure the virtual address difference and the
+             file offset difference is identical from the section before BSS,
+             and BSS. *)
+          let diff = let open Int64 in (bss.sh_addr - prev.sh_addr) - (bss.sh_offset - prev.sh_offset) in
+          Int64.sub diff lpad
+        else 0L in
+      let size1 =
+        if succ n_bss < t.hdr.e_shnum
+        then
+          let next = List.nth t.sht (succ n_bss) in
+          if next.sh_offset <= Int64.add bss.sh_offset bss.sh_size
+          then Int64.sub bss.sh_offset next.sh_offset else 0L
+        else 0L in
+      Int64.(size0 + size1), bss.sh_size
+    | _ -> 0L, 0L in
+  (n_bss, bss), shifts, ssize, rsize
+
+let shift_shdr ~shift shdr =
+  { shdr with sh_offset= Int64.add shdr.sh_offset shift }
+
+let pad_shdr t =
+  let start = Int64.add t.hdr.e_phoff (Int64.of_int (t.hdr.e_phentsize * t.hdr.e_phnum)) in
+  let top = offset ~start t.pscts in
+  if top < t.hdr.e_shoff then Int64.sub t.hdr.e_shoff top else 0L
+
+let patch_of_fix_nobits t (n_bss, bss) shifts (ssize, rsize) =
+  let open Rresult.R in
+  let old_e_shoff = t.hdr.e_shoff in
+  let ehdr = { t.hdr with e_shoff= Int64.(t.hdr.e_shoff + ssize + rsize) } in
+  segment_of_sh_addr t.pht ~sh_addr:bss.sh_addr >>= fun segment ->
+  let hunk_ehdr =
+    Bduff.insert ~name:"ELF header" ~off:0L ~len:ehdr.e_ehsize { off= 0L; len= ehdr.e_ehsize; raw= ehdr_to_bigstring ehdr } in
+  let hunks_phdr =
+    List.mapi
+      (fun i phdr ->
+         let off = Int64.add ehdr.e_phoff (Int64.of_int (i * ehdr.e_phentsize)) in
+         let len = ehdr.e_phentsize in
+
+         if phdr_equal phdr segment
+         then
+           let phdr = { phdr with p_filesz= Int64.(phdr.p_filesz + ssize + rsize) } in
+           Bduff.insert ~name:"Segment of BSS" ~off ~len { off= 0L; len; raw= phdr_to_bigstring ~ehdr phdr }
+         else Bduff.copy ~name:(Fmt.strf "Segment %2d" i) ~src_off:off ~dst_off:off ~len:(Int64.of_int len) `Binary)
+      t.pht in
+  let pscts0 = pscts_of_offset ~sh_offset:bss.sh_offset t |> fst in
+  let hunks_psct0 =
+    List.map (function
+        | Section { off; len; name; _ } ->
+          Bduff.copy ?name ~src_off:off ~dst_off:off ~len `Binary
+        | Zero len -> Bduff.zero len)
+      pscts0 in
+  let hunks_psct1 =
+    List.mapi (fun n psct -> match n, psct with
+        | _, Section { off; len; name; _ } ->
+          Bduff.copy ?name ~src_off:off ~dst_off:Int64.(off + ssize + rsize) ~len `Binary
+        | _, Zero len -> Bduff.zero len)
+      shifts in
+  let hunks_psct1 = Bduff.zero Int64.(ssize + rsize) :: hunks_psct1 in
+  let pad_shdr =
+    let len = pad_shdr t in if len = 0L then [] else [ Bduff.zero len ] in
+  let hunks_shdr =
+    List.mapi (fun n shdr ->
+        let off = Int64.add ehdr.e_shoff (Int64.of_int (n * ehdr.e_shentsize)) in
+        let src_off = Int64.add old_e_shoff (Int64.of_int (n * ehdr.e_shentsize)) in
+        let len = ehdr.e_shentsize in
+        if n = n_bss then Bduff.insert ~name:".bss" ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr bss }
+        else if n > n_bss then
+          let shdr = shift_shdr ~shift:Int64.(ssize + rsize) shdr in
+          Bduff.insert ~name:(Fmt.strf "Section %2d" n) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr shdr }
+        else Bduff.copy ~name:(Fmt.strf "Section %2d" n) ~src_off ~dst_off:off ~len:(Int64.of_int len) `Binary)
+      t.sht in
+  Ok (hunk_ehdr :: hunks_phdr @ hunks_psct0 @ hunks_psct1 @ pad_shdr @ hunks_shdr)
+
+(* XXX INJECT SECTION XXX *)
+
+let last_section_loaded_of_phdr t phdr =
+  let rec go last = function
+    | [] -> last
+    | Zero _ :: r -> go last r
+    | Section { off; len; _ } as sct :: r ->
+      if off < phdr.p_offset
+      then go last r
+      else if off >= phdr.p_offset && Int64.(off + len) <= Int64.(phdr.p_offset + phdr.p_filesz)
+      then
+        ( match last with
+        | None -> go (Some sct) r
+        | Some (Section { off= off0; len= len0; _ }) ->
+          if Int64.(off0 + len0) > Int64.(off + len)
+          then go last r
+          else go (Some sct) r
+        | Some _ -> go (Some sct) r)
+      else go last r in
+  match go None t.pscts with
+  | Some psct -> Ok psct
+  | None -> Error (`Unaligned_or_unexistant_psct_into phdr)
+
+let last_pt_load pht =
+  try let v = List.find (fun phdr -> p_type_of_phdr phdr = PT_LOAD) (List.rev pht) in Ok v
+  with Not_found -> Error `Phdr_not_found
+
+module Name : sig type t = private string val v : string -> t val length : t -> int val to_string : t -> string end = struct
+  type t = string
+
+  let v x = x ^ "\000"
+  let length = String.length
+  let to_string x = String.sub x 0 (String.length x - 1)
+end
+
+let inject_shstr_name ~(name:Name.t) t =
+  let shstr = List.nth t.sht t.hdr.e_shstrndx in
+
+  Int64.to_int32 shstr.sh_size,
+  (fun ~dst_off ->
+     let hunk_shstr = Bduff.copy ~src_off:shstr.sh_offset ~dst_off ~len:shstr.sh_size ~name:".shstrtab" `Binary in
+     let hunk_name = Bduff.insert ~off:Int64.(dst_off + shstr.sh_size) ~len:(Name.length name)
+         { raw= Bigstringaf.of_string ~off:0 ~len:(Name.length name) (name :> string)
+         ; off= 0L; len= Name.length name } in
+     [ hunk_shstr; hunk_name ]),
+  (fun ~sh_offset ~dst_off ->
+     let shstr = { shstr with sh_offset= sh_offset
+                            ; sh_size= Int64.(shstr.sh_size + (of_int (Name.length name))) } in
+     let raw = shdr_to_bigstring ~ehdr:t.hdr shstr in
+     [ Bduff.insert ~name:".shstrtab" ~off:dst_off ~len:t.hdr.e_shentsize { raw; off= 0L; len= t.hdr.e_shentsize } ])
+
+let size_of_addr ~ehdr = match ei_class_of_e_ident ~e_ident:ehdr.e_ident with
+  | ELF_CLASS_32 -> 4L
+  | ELF_CLASS_64 -> 8L
+  | ELF_CLASS_NONE -> Fmt.invalid_arg "Invalid ELF binary"
+
+let craft_new_data_section t ~name:sect_name sh_size =
+  let open Rresult.R in
+  last_pt_load t.pht >>= fun phdr ->
+  last_section_loaded_of_phdr t phdr >>= function
+  | Zero _ -> Fmt.invalid_arg "Invalid last section of last PT_LOAD segment"
+  | Section { shdr= n_last; _ } ->
+    let last = List.nth t.sht n_last in
+    Fmt.epr "last.sh_offset:%8Lx + last.sh_size:%8Lx\n%!" last.sh_offset last.sh_size ;
+    let vpad =
+      if Int64.(rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr)) <> 0L
+      then let open Int64 in (size_of_addr ~ehdr:t.hdr) - (rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr))
+      else 0L in
+    let ppad = Int64.(rem (last.sh_offset + last.sh_size) last.sh_addralign) in
+    (* XXX(dinosaure): even if [sh_size] should be equal to 0, (it's a .bss
+       section), we fixed it on the previous pass. *)
+    let sh_addr = let open Int64 in last.sh_addr + last.sh_size + vpad in
+    let sh_offset = let open Int64 in last.sh_offset + last.sh_size + ppad in
+    Fmt.epr ">>> sh_offset %8Lx\n%!" sh_offset ;
+    Fmt.epr ">>> sh_addr %8Lx\n%!" sh_addr ;
+    let sh_name, _, _ = inject_shstr_name ~name:sect_name t in
+    let shdr =
+      { sh_name
+      ; sh_type= 1l (* SHT_LOAD *)
+      ; sh_flags= 3L (* SHT_WRITE | SHT_ALLOC *)
+      ; sh_addr
+      ; sh_offset
+      ; sh_size
+      ; sh_link= 0l
+      ; sh_info= 0l
+      ; sh_addralign= 1L
+      ; sh_entsize= 0L } in
+    let psct = Section { name= Some (Name.to_string sect_name)
+                       ; shdr= succ n_last
+                       ; off= sh_offset
+                       ; len= sh_size } in
+    let phdr = { phdr with p_filesz= Int64.add phdr.p_filesz sh_size
+                         ; p_memsz= Int64.add phdr.p_memsz sh_size } in
+    Ok (phdr, succ n_last, shdr, psct)
+
+let inject_new_data_section t ~name:sect_name sh_size (new_pt_load, n_shdr, new_shdr, _psct) =
+  let _, craft_strtab, craft_shstrtab = inject_shstr_name ~name:sect_name t in
+  let old_e_shoff = t.hdr.e_shoff in
+  let ehdr =
+    { t.hdr with e_shstrndx= if n_shdr <= t.hdr.e_shstrndx then succ t.hdr.e_shstrndx else t.hdr.e_shstrndx
+               ; e_shoff= Int64.(t.hdr.e_shoff + sh_size + (Int64.of_int (Name.length sect_name))) } in
+  let open Rresult.R in
+  last_pt_load t.pht >>= fun last_pt_load ->
+  let _hunk_ehdr =
+    Bduff.insert ~name:"ELF header" ~off:0L ~len:ehdr.e_ehsize { off= 0L; len= ehdr.e_ehsize; raw= ehdr_to_bigstring ehdr } in
+  let _hunks_phdr =
+    List.mapi
+      (fun i phdr ->
+         let off = Int64.add ehdr.e_phoff (Int64.of_int (i * ehdr.e_phentsize)) in
+         let len = ehdr.e_phentsize in
+
+         if phdr_equal phdr last_pt_load
+         then Bduff.insert ~name:"Segment of injection" ~off ~len { off= 0L; len; raw= phdr_to_bigstring ~ehdr new_pt_load }
+         else Bduff.copy ~name:(Fmt.strf "Segment %2d" i) ~src_off:off ~dst_off:off ~len:(Int64.of_int len) `Binary)
+      t.pht in
+  let pscts0, shifts = pscts_of_offset ~sh_offset:new_shdr.sh_offset t in
+  (* XXX(dinosaure): assume that .shstrtab is __after__ [shdr]. *)
+  let _hunks_psct0s =
+    List.map (function
+        | Section { off; len; name; _ } ->
+          Bduff.copy ?name ~src_off:off ~dst_off:off ~len `Binary
+        | Zero len -> Bduff.zero len)
+      pscts0 in
+  let shstrtab_sh_offset = ref 0L in
+  let _hunks_psct1s =
+    List.map (function
+        | Section { off; len; name; shdr= n } ->
+          if n = t.hdr.e_shstrndx
+          then ( shstrtab_sh_offset := Int64.(off + sh_size) ; craft_strtab ~dst_off:Int64.(off + sh_size) )
+          else [ Bduff.copy ?name ~src_off:off ~dst_off:Int64.(off + sh_size) ~len `Binary ]
+        | Zero len -> [ Bduff.zero len ])
+      shifts |> List.concat in
+  let _new_psct = [ Bduff.copy ~src_off:0L ~dst_off:new_shdr.sh_offset ~name:".provision" ~len:sh_size `Provision ] in
+  let _pad_shdr =
+    let len = pad_shdr t in if len = 0L then [] else [ Bduff.zero len ] in
+  let _hunks_shdr =
+    List.fold_left (fun (acc, rn, on) shdr ->
+        let off = Int64.add ehdr.e_shoff (Int64.of_int (rn * ehdr.e_shentsize)) in
+        let src_off = Int64.add old_e_shoff (Int64.of_int (on * ehdr.e_shentsize)) in
+        let len = ehdr.e_shentsize in
+
+        if rn = n_shdr
+        then
+          let hunk = Bduff.insert ~name:(Name.to_string sect_name) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr new_shdr } in
+          (hunk :: acc, succ rn, on)
+        else if rn = ehdr.e_shstrndx
+        then (craft_shstrtab ~sh_offset:!shstrtab_sh_offset ~dst_off:off @ acc, succ rn, succ on)
+        else if rn > n_shdr
+        then
+          let shdr = shift_shdr ~shift:sh_size shdr in
+          let hunk = Bduff.insert ~name:(Fmt.strf "Section %2d" on) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr shdr } in
+          (hunk :: acc, succ rn, succ on)
+        else
+          let hunk = Bduff.copy ~name:(Fmt.strf "Section %2d" on) ~src_off ~dst_off:off ~len:(Int64.of_int len) `Binary in
+          (hunk :: acc, succ rn, succ on))
+      ([], 0, 0) t.sht |> fun (lst, _, _) -> List.rev lst in
+  let hunks = _hunk_ehdr :: _hunks_phdr @ _hunks_psct0s @ _new_psct @ _hunks_psct1s @ _pad_shdr @ _hunks_shdr in
+  Ok hunks
+
 module Us = Make(struct type 'a t = 'a end)
+module U = Unix
 
 module Unix = struct
   type 'fd v = { fd : 'fd; max : int64; }
@@ -863,9 +1209,16 @@ module Unix = struct
 
   type 'fd t = { v : 'fd v; cache : Window.t; }
 
-  let v ~fpath =
+  let ro ~fpath =
     try
       let fd = Unix.openfile (Fpath.to_string fpath) Unix.[ O_RDONLY ] 0o644 in
+      let max = let st = Unix.LargeFile.fstat fd in st.Unix.LargeFile.st_size in
+      Us.inj (Ok { v= { fd; max; }; cache= Window.make (); })
+    with _ -> Us.inj (Error (`Invalid_file fpath))
+
+  let rw ~fpath =
+    try
+      let fd = Unix.openfile (Fpath.to_string fpath) Unix.[ O_RDWR ] 0o644 in
       let max = let st = Unix.LargeFile.fstat fd in st.Unix.LargeFile.st_size in
       Us.inj (Ok { v= { fd; max; }; cache= Window.make (); })
     with _ -> Us.inj (Error (`Invalid_file fpath))
@@ -873,6 +1226,8 @@ module Unix = struct
   let make ~fpath =
     let fd = Unix.openfile (Fpath.to_string fpath) Unix.[ O_RDWR; O_CREAT ] 0o644 in
     Us.inj (Ok fd)
+
+  let close { v= { fd; _ }; _ } = Unix.close fd ; Us.inj (Ok ())
 
   let load t ~pos ~len = Window.load t.v t.cache ~pos ~len
 
@@ -883,6 +1238,22 @@ module Unix = struct
       Us.inj (Ok (Bigstringaf.get raw sub_off))
     | Error err -> Us.inj (Error err)
 
+  external bytes_set_int64 : bytes -> int -> int64 -> unit = "%caml_bytes_set64"
+  external swap64 : int64 -> int64 = "%bswap_int64"
+
+  let bytes_set_int64_be =
+    if Sys.big_endian
+    then fun buf off v -> bytes_set_int64 buf off v
+    else fun buf off v -> bytes_set_int64 buf off (swap64 v)
+
+  let set_int64_be t ~pos v =
+    let bytes = Bytes.create 8 in
+    bytes_set_int64_be bytes 0 v ;
+    try
+      let _ = Unix.LargeFile.lseek t.v.fd pos Unix.SEEK_SET in
+      let _ = Unix.write t.v.fd bytes 0 8 in Us.inj (Ok ())
+    with _ -> Us.inj (Error (`Invalid_offset pos))
+
   let writev fd = function
     | Raw { raw; src_off; len; _ } ->
       let raw = Bigstringaf.substring raw ~off:src_off ~len in
@@ -891,10 +1262,20 @@ module Unix = struct
       let len = Int64.to_int len in
       let raw = Bytes.make len '\000' in
       let len = Unix.write fd raw 0 len in Us.inj len
+
+  let writev_of_output output () = function
+    | Raw { raw; src_off; len; _ } ->
+      let raw = Bigstringaf.substring raw ~off:src_off ~len in
+      output (Some (Bytes.unsafe_of_string raw, 0, len)) ; Us.inj len
+    | Zero len ->
+      let len = Int64.to_int len in
+      let raw = Bytes.make len '\000' in
+      output (Some (raw, 0, len)) ; Us.inj len
 end
 
 let pp_source ppf = function
   | `Binary -> Fmt.pf ppf "<binary>"
+  | `Provision -> Fmt.pf ppf "<provision>"
 
 let pp_error ~pp_source ppf = function
   | `Invalid_bounds { pos; len; } -> Fmt.pf ppf "Invalid bounds (pos: %Ld, len: %d)" pos len
@@ -903,99 +1284,13 @@ let pp_error ~pp_source ppf = function
   | `Phdr_not_found -> Fmt.pf ppf "Program header not found"
   | `Invalid_patch -> Fmt.pf ppf "Invalid patch"
   | `Not_found src -> Fmt.pf ppf "Source not found: %a" pp_source src
+  | `Msg err -> Fmt.pf ppf "%s" err
+  | `Unaligned_or_unexistant_psct_into _ -> Fmt.pf ppf "Did not find any valid physical section into program header"
+  | `Invalid_offset pos -> Fmt.pf ppf "Invalid offset %8Lx" pos
+  | `Multiple_occurence_of_provision -> Fmt.pf ppf "Multiple occurence of provision"
+  | `No_occurence_of_provision -> Fmt.pf ppf "No occurence of provision"
 
-let fix_nobits_sct t bss psct =
-  let n_bss, shifts = match psct with
-    | Section { shdr= n; _ } ->
-      let _, pscts = List.partition
-          (function
-            | Section { shdr= shdr'; _ } -> n = shdr'
-            | _ -> false)
-          (pscts_of_offset ~sh_offset:bss.sh_offset t |> snd) in
-      n, pscts
-    | _ -> Fmt.invalid_arg "Invalid physical section" in
-  let ssize, rsize = match psct with
-    | Section { shdr= n_bss; _ } ->
-      let size0 =
-        if n_bss > 0
-        then
-          let prev = List.nth t.sht (pred n_bss) in
-          (* XXX(dinosaure): fixup file offset of BSS section and makes it
-             matches the previous section file offset added to the previous
-             size. fixup phdr size. *)
-          let lpad = let open Int64 in bss.sh_offset - (prev.sh_offset + prev.sh_size) in
-          (* XXX(dinosaure): make sure the virtual address difference and the
-             file offset difference is identical from the section before BSS,
-             and BSS. *)
-          let diff = let open Int64 in (bss.sh_addr - prev.sh_addr) - (bss.sh_offset - prev.sh_offset) in
-          Int64.sub diff lpad
-        else 0L in
-      let size1 =
-        if succ n_bss < t.hdr.e_shnum
-        then
-          let next = List.nth t.sht (succ n_bss) in
-          if next.sh_offset <= Int64.add bss.sh_offset bss.sh_size
-          then Int64.sub bss.sh_offset next.sh_offset else 0L
-        else 0L in
-      Int64.(size0 + size1), bss.sh_size
-    | _ -> 0L, 0L in
-  (n_bss, bss), shifts, ssize, rsize
-
-let shift_shdr ~shift shdr =
-  { shdr with sh_offset= Int64.add shdr.sh_offset shift }
-
-let pad_shdr t =
-  let start = Int64.add t.hdr.e_phoff (Int64.of_int (t.hdr.e_phentsize * t.hdr.e_phnum)) in
-  let top = offset ~start t.pscts in
-  if top < t.hdr.e_shoff then Int64.sub t.hdr.e_shoff top else 0L
-
-let patch_of_fix_nobits t (n_bss, bss) shifts (ssize, rsize) =
-  let open Rresult.R in
-  let old_e_shoff = t.hdr.e_shoff in
-  let ehdr = { t.hdr with e_shoff= Int64.(t.hdr.e_shoff + ssize + rsize) } in
-  segment_of_sh_addr t.pht ~sh_addr:bss.sh_addr >>= fun segment ->
-  let hunk_ehdr =
-    Bduff.insert ~name:"ELF header" ~off:0L ~len:t.hdr.e_ehsize { off= 0L; len= ehdr.e_ehsize; raw= ehdr_to_bigstring ehdr } in
-  let hunks_phdr =
-    List.mapi
-      (fun i phdr ->
-         let off = Int64.add ehdr.e_phoff (Int64.of_int (i * ehdr.e_phentsize)) in
-         let len = ehdr.e_phentsize in
-
-         if phdr_equal phdr segment
-         then
-           let phdr = { phdr with p_filesz= Int64.(phdr.p_filesz + ssize + rsize) } in
-           Bduff.insert ~name:"Segment of BSS" ~off ~len { off= 0L; len; raw= phdr_to_bigstring ~ehdr phdr }
-         else Bduff.copy ~name:(Fmt.strf "Segment %2d" i) ~src_off:off ~dst_off:off ~len:(Int64.of_int len) `Binary)
-      t.pht in
-  let pscts0 = pscts_of_offset ~sh_offset:bss.sh_offset t |> fst in
-  let hunks_psct0 =
-    List.map (function
-        | Section { off; len; name; _ } ->
-          Bduff.copy ?name ~src_off:off ~dst_off:off ~len `Binary
-        | Zero len -> Bduff.zero len)
-      pscts0 in
-  let hunks_psct1 =
-    List.mapi (fun n psct -> match n, psct with
-        | _, Section { off; len; name; _ } ->
-          Bduff.copy ?name ~src_off:off ~dst_off:Int64.(off + ssize + rsize) ~len `Binary
-        | _, Zero len -> Bduff.zero len)
-      shifts in
-  let hunks_psct1 = Bduff.zero Int64.(ssize + rsize) :: hunks_psct1 in
-  let pad_shdr =
-    let len = pad_shdr t in if len = 0L then [] else [ Bduff.zero len ] in
-  let hunks_shdr =
-    List.mapi (fun n shdr ->
-        let off = Int64.add ehdr.e_shoff (Int64.of_int (n * ehdr.e_shentsize)) in
-        let src_off = Int64.add old_e_shoff (Int64.of_int (n * ehdr.e_shentsize)) in
-        let len = ehdr.e_shentsize in
-        if n = n_bss then Bduff.insert ~name:".bss" ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr bss }
-        else if n > n_bss then
-          let shdr = shift_shdr ~shift:Int64.(ssize + rsize) shdr in
-          Bduff.insert ~name:(Fmt.strf "Section %2d" n) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr shdr }
-        else Bduff.copy ~name:(Fmt.strf "Section %2d" n) ~src_off ~dst_off:off ~len:(Int64.of_int len) `Binary)
-      t.sht in
-  Ok (hunk_ehdr :: hunks_phdr @ hunks_psct0 @ hunks_psct1 @ pad_shdr @ hunks_shdr)
+let src_caravan = Logs.Src.create ~doc:"caravan" "caravan"
 
 let () = Fmt_tty.setup_std_outputs ~style_renderer:`Ansi_tty ~utf_8:true ()
 let () = Logs.set_level ~all:true (Some Logs.Debug)
@@ -1004,20 +1299,69 @@ let () =
   Logs.set_reporter reporter
 
 let () =
-  let fpath_src = Fpath.v Sys.argv.(1) in
-  let fpath_dst = Fpath.v Sys.argv.(2) in
+  let a_out = Fpath.v Sys.argv.(1) in
+  let provision = Fpath.v Sys.argv.(2) in
+  let result = Fpath.v Sys.argv.(3) in
+  let name = Name.v ".provision" in
+
   let ( >>= ) x f = match Us.prj x with
     | Ok v -> f v
     | Error err -> Us.inj (Error err) in
-  let fiber =
-    Unix.v ~fpath:fpath_src >>= fun src ->
-    Unix.make ~fpath:fpath_dst >>= fun dst ->
-    make Unix.unix ~load:Unix.load ~get:Unix.get ~fpath:fpath_src src >>= fun t ->
+  let ( <* ) x f = match Us.prj x with
+    | Error err -> Us.inj (Error err)
+    | Ok v -> match Us.prj (f ()) with
+      | Ok () -> Us.inj (Ok v)
+      | Error err -> Us.inj (Error err) in
+
+  let fiber0 fpath =
+    Unix.ro ~fpath >>= fun src ->
+    make Unix.unix ~load:Unix.load ~get:Unix.get ~fpath src >>= fun t ->
     let nobits_scts = nobits_scts t in
     let shdr, psct = List.hd nobits_scts in
     let bss, shifts, ssize, rsize = fix_nobits_sct t shdr psct in
     patch_of_fix_nobits t bss shifts (ssize, rsize) |> Unix.unix.return >>= fun bduff ->
-    Bduff.apply Unix.unix ~sources:[ `Binary, src ] ~load:Unix.load ~writev:Unix.writev dst bduff in
-  match Us.prj fiber with
+    Bos.OS.File.tmp "a.out-%s" |> Us.inj >>= fun fpath ->
+    Bos.OS.File.with_output fpath
+      (fun output fpath ->
+         Logs.msg ~src:src_caravan Logs.Info (fun m -> m "Output a.out is %a" Fpath.pp fpath) ;
+         let writev = Unix.writev_of_output output in
+         let res = Bduff.apply Unix.unix ~sources:[ `Binary, src ] ~load:Unix.load ~writev () bduff |> Us.prj in
+         Rresult.R.map (fun len -> (fpath, len)) res)
+      fpath
+    |> Rresult.R.join |> Us.inj <* fun () -> Unix.close src in
+
+  let fiber1 fpath fpath_provision =
+    Unix.ro ~fpath >>= fun src ->
+    Bos.OS.Path.stat fpath_provision |> Unix.unix.return >>= fun stat ->
+    Unix.ro ~fpath:fpath_provision >>= fun provision ->
+    make Unix.unix ~load:Unix.load ~get:Unix.get ~fpath src >>= fun t ->
+    craft_new_data_section t ~name (Int64.of_int stat.U.st_size) |> Us.inj >>= fun (phdr, n, shdr, psct) ->
+    inject_new_data_section t ~name (Int64.of_int stat.U.st_size) (phdr, n, shdr, psct) |> Unix.unix.return >>= fun bduff ->
+    Bos.OS.File.tmp "a.out-%s" |> Us.inj >>= fun fpath ->
+    Bos.OS.File.with_output fpath
+      (fun output fpath ->
+         Logs.msg ~src:src_caravan Logs.Info (fun m -> m "Output a.out is %a" Fpath.pp fpath) ;
+         let writev = Unix.writev_of_output output in
+         let res = Bduff.apply Unix.unix ~sources:[ `Binary, src; `Provision, provision ] ~load:Unix.load ~writev () bduff |> Us.prj in
+         Rresult.R.map (fun len -> (fpath, len, (shdr.sh_addr, stat.U.st_size))) res)
+      fpath
+    |> Rresult.R.join |> Us.inj <* fun () -> Unix.close src <* fun () -> Unix.close provision in
+
+  let fiber2 fpath vaddr len =
+    Unix.rw ~fpath >>= fun src ->
+    Bm.find_all ~pattern:"PROVISION" Unix.unix ~get:Unix.get ~ln:src.Unix.v.Unix.max src >>= function
+    | [ occ ] ->
+      Unix.set_int64_be src ~pos:Int64.(occ + 10L) vaddr >>= fun () ->
+      Unix.set_int64_be src ~pos:Int64.(occ + 18L) len >>= fun () ->
+      Unix.unix.return (Ok fpath)
+    | [] -> Unix.unix.return (Error `No_occurence_of_provision)
+    | _ -> Unix.unix.return (Error `Multiple_occurence_of_provision) in
+
+  match Us.prj (fiber0 a_out
+                >>= fun (a_out, _) -> fiber1 a_out provision
+                >>= fun (a_out, _, (vaddr, len)) -> fiber2 a_out vaddr (Int64.of_int len)) with
   | Error err -> Fmt.epr "%a\n%!" (pp_error ~pp_source) err
-  | Ok w -> Fmt.pr ">>> binary output %Ld byte(s).\n%!" w
+  | Ok a_out ->
+    match Bos.OS.Path.move ~force:true a_out result with
+    | Ok () -> Fmt.pr ">>> <%a>.\n%!" Fpath.pp result
+    | Error err -> Fmt.epr "%a\n%!" (pp_error ~pp_source) err
