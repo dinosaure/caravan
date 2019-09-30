@@ -1,0 +1,3 @@
+(executable
+ (name ex01)
+ (libraries hxd.string fmt provision))
