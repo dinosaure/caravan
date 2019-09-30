@@ -1,4 +1,4 @@
 (library
  (name provision)
  (c_names load)
- (libraries fmt))
+ (libraries fmt bigstringaf))

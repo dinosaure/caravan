@@ -1056,7 +1056,6 @@ let craft_new_data_section t ~name:sect_name sh_size =
   | Zero _ -> Fmt.invalid_arg "Invalid last section of last PT_LOAD segment"
   | Section { shdr= n_last; _ } ->
     let last = List.nth t.sht n_last in
-    Fmt.epr "last.sh_offset:%8Lx + last.sh_size:%8Lx\n%!" last.sh_offset last.sh_size ;
     let vpad =
       if Int64.(rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr)) <> 0L
       then let open Int64 in (size_of_addr ~ehdr:t.hdr) - (rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr))
@@ -1066,8 +1065,6 @@ let craft_new_data_section t ~name:sect_name sh_size =
        section), we fixed it on the previous pass. *)
     let sh_addr = let open Int64 in last.sh_addr + last.sh_size + vpad in
     let sh_offset = let open Int64 in last.sh_offset + last.sh_size + ppad in
-    Fmt.epr ">>> sh_offset %8Lx\n%!" sh_offset ;
-    Fmt.epr ">>> sh_addr %8Lx\n%!" sh_addr ;
     let sh_name, _, _ = inject_shstr_name ~name:sect_name t in
     let shdr =
       { sh_name
@@ -1292,76 +1289,146 @@ let pp_error ~pp_source ppf = function
 
 let src_caravan = Logs.Src.create ~doc:"caravan" "caravan"
 
-let () = Fmt_tty.setup_std_outputs ~style_renderer:`Ansi_tty ~utf_8:true ()
-let () = Logs.set_level ~all:true (Some Logs.Debug)
-let () =
-  let reporter = Logs_fmt.reporter () in
-  Logs.set_reporter reporter
+let ( >>= ) x f = match Us.prj x with
+  | Ok v -> f v
+  | Error err -> Us.inj (Error err)
 
-let () =
-  let a_out = Fpath.v Sys.argv.(1) in
-  let provision = Fpath.v Sys.argv.(2) in
-  let result = Fpath.v Sys.argv.(3) in
+let ( <* ) x f = match Us.prj x with
+  | Error err -> Us.inj (Error err)
+  | Ok v -> match Us.prj (f ()) with
+    | Ok () -> Us.inj (Ok v)
+    | Error err -> Us.inj (Error err)
+
+let fiber0 fpath =
+  Unix.ro ~fpath >>= fun src ->
+  make Unix.unix ~load:Unix.load ~get:Unix.get ~fpath src >>= fun t ->
+  let nobits_scts = nobits_scts t in
+  let shdr, psct = List.hd nobits_scts in
+  let bss, shifts, ssize, rsize = fix_nobits_sct t shdr psct in
+  Fmt.pr "[%a] BSS section (offset: %08Lx, len: %Ld).\n%!" Fmt.(styled `Yellow string) "." (snd bss).sh_addr (snd bss).sh_size ;
+  patch_of_fix_nobits t bss shifts (ssize, rsize) |> Unix.unix.return >>= fun bduff ->
+  Bos.OS.File.tmp "a.out-%s" |> Us.inj >>= fun fpath ->
+  Bos.OS.File.with_output fpath
+    (fun output fpath ->
+       Logs.msg ~src:src_caravan Logs.Info (fun m -> m "Output a.out is %a" Fpath.pp fpath) ;
+       let writev = Unix.writev_of_output output in
+       let res = Bduff.apply Unix.unix ~sources:[ `Binary, src ] ~load:Unix.load ~writev () bduff |> Us.prj in
+       Rresult.R.map (fun len -> (fpath, len)) res)
+    fpath
+  |> Rresult.R.join |> Us.inj <* fun () ->
+      Fmt.epr "[%a] BSS section fixed.\n%!" Fmt.(styled `Green string) "x" ;
+      Unix.close src
+
+let fiber1 fpath fpath_provision =
   let name = Name.v ".provision" in
 
-  let ( >>= ) x f = match Us.prj x with
-    | Ok v -> f v
-    | Error err -> Us.inj (Error err) in
-  let ( <* ) x f = match Us.prj x with
-    | Error err -> Us.inj (Error err)
-    | Ok v -> match Us.prj (f ()) with
-      | Ok () -> Us.inj (Ok v)
-      | Error err -> Us.inj (Error err) in
+  Unix.ro ~fpath >>= fun src ->
+  Bos.OS.Path.stat fpath_provision |> Unix.unix.return >>= fun stat ->
+  Unix.ro ~fpath:fpath_provision >>= fun provision ->
+  make Unix.unix ~load:Unix.load ~get:Unix.get ~fpath src >>= fun t ->
+  craft_new_data_section t ~name (Int64.of_int stat.U.st_size) |> Us.inj >>= fun (phdr, n, shdr, psct) ->
+  Fmt.pr "[%a] new <.provision> section (offset: %08Lx, len: %Ld).\n%!" Fmt.(styled `Yellow string) "." shdr.sh_offset shdr.sh_size ;
+  inject_new_data_section t ~name (Int64.of_int stat.U.st_size) (phdr, n, shdr, psct) |> Unix.unix.return >>= fun bduff ->
+  Bos.OS.File.tmp "a.out-%s" |> Us.inj >>= fun fpath ->
+  Bos.OS.File.with_output fpath
+    (fun output fpath ->
+        Logs.msg ~src:src_caravan Logs.Info (fun m -> m "Output a.out is %a" Fpath.pp fpath) ;
+        let writev = Unix.writev_of_output output in
+        let res = Bduff.apply Unix.unix ~sources:[ `Binary, src; `Provision, provision ] ~load:Unix.load ~writev () bduff |> Us.prj in
+        Rresult.R.map (fun len -> (fpath, len, (shdr.sh_addr, stat.U.st_size))) res)
+    fpath
+  |> Rresult.R.join |> Us.inj <* fun () ->
+      Fmt.epr "[%a] <.provision> section added (virtual addr: %08Lx, len: %d).\n%!" Fmt.(styled `Green string) "x" shdr.sh_addr stat.U.st_size ;
+      Unix.close src <* fun () -> Unix.close provision
 
-  let fiber0 fpath =
-    Unix.ro ~fpath >>= fun src ->
-    make Unix.unix ~load:Unix.load ~get:Unix.get ~fpath src >>= fun t ->
-    let nobits_scts = nobits_scts t in
-    let shdr, psct = List.hd nobits_scts in
-    let bss, shifts, ssize, rsize = fix_nobits_sct t shdr psct in
-    patch_of_fix_nobits t bss shifts (ssize, rsize) |> Unix.unix.return >>= fun bduff ->
-    Bos.OS.File.tmp "a.out-%s" |> Us.inj >>= fun fpath ->
-    Bos.OS.File.with_output fpath
-      (fun output fpath ->
-         Logs.msg ~src:src_caravan Logs.Info (fun m -> m "Output a.out is %a" Fpath.pp fpath) ;
-         let writev = Unix.writev_of_output output in
-         let res = Bduff.apply Unix.unix ~sources:[ `Binary, src ] ~load:Unix.load ~writev () bduff |> Us.prj in
-         Rresult.R.map (fun len -> (fpath, len)) res)
-      fpath
-    |> Rresult.R.join |> Us.inj <* fun () -> Unix.close src in
+let fiber2 fpath vaddr len =
+  Unix.rw ~fpath >>= fun src ->
+  Bm.find_all ~pattern:"PROVISION" Unix.unix ~get:Unix.get ~ln:src.Unix.v.Unix.max src >>= function
+  | [ occ ] ->
+    Fmt.pr "[%a] provision occurence found at %08Lx.\n%!" Fmt.(styled `Yellow string) "." occ ;
+    Unix.set_int64_be src ~pos:Int64.(occ + 10L) vaddr >>= fun () ->
+    Unix.set_int64_be src ~pos:Int64.(occ + 18L) len >>= fun () ->
+    Fmt.epr "[%a] provision value updated.\n%!" Fmt.(styled `Green string) "x" ;
+    Unix.unix.return (Ok fpath)
+  | [] -> Unix.unix.return (Error `No_occurence_of_provision)
+  | _ -> Unix.unix.return (Error `Multiple_occurence_of_provision)
 
-  let fiber1 fpath fpath_provision =
-    Unix.ro ~fpath >>= fun src ->
-    Bos.OS.Path.stat fpath_provision |> Unix.unix.return >>= fun stat ->
-    Unix.ro ~fpath:fpath_provision >>= fun provision ->
-    make Unix.unix ~load:Unix.load ~get:Unix.get ~fpath src >>= fun t ->
-    craft_new_data_section t ~name (Int64.of_int stat.U.st_size) |> Us.inj >>= fun (phdr, n, shdr, psct) ->
-    inject_new_data_section t ~name (Int64.of_int stat.U.st_size) (phdr, n, shdr, psct) |> Unix.unix.return >>= fun bduff ->
-    Bos.OS.File.tmp "a.out-%s" |> Us.inj >>= fun fpath ->
-    Bos.OS.File.with_output fpath
-      (fun output fpath ->
-         Logs.msg ~src:src_caravan Logs.Info (fun m -> m "Output a.out is %a" Fpath.pp fpath) ;
-         let writev = Unix.writev_of_output output in
-         let res = Bduff.apply Unix.unix ~sources:[ `Binary, src; `Provision, provision ] ~load:Unix.load ~writev () bduff |> Us.prj in
-         Rresult.R.map (fun len -> (fpath, len, (shdr.sh_addr, stat.U.st_size))) res)
-      fpath
-    |> Rresult.R.join |> Us.inj <* fun () -> Unix.close src <* fun () -> Unix.close provision in
+let setup style_renderer log_level cwd =
+  Fmt_tty.setup_std_outputs ?style_renderer () ;
+  Logs.set_level log_level ;
+  Logs.set_reporter (Logs_fmt.reporter ~app:Fmt.stdout ()) ;
+  match cwd with
+  | None -> `Ok ()
+  | Some dir ->
+    match Bos.OS.Dir.set_current dir with
+    | Ok () -> `Ok ()
+    | Error err -> `Error (false, Fmt.strf "%a" Rresult.R.pp_msg err)
 
-  let fiber2 fpath vaddr len =
-    Unix.rw ~fpath >>= fun src ->
-    Bm.find_all ~pattern:"PROVISION" Unix.unix ~get:Unix.get ~ln:src.Unix.v.Unix.max src >>= function
-    | [ occ ] ->
-      Unix.set_int64_be src ~pos:Int64.(occ + 10L) vaddr >>= fun () ->
-      Unix.set_int64_be src ~pos:Int64.(occ + 18L) len >>= fun () ->
-      Unix.unix.return (Ok fpath)
-    | [] -> Unix.unix.return (Error `No_occurence_of_provision)
-    | _ -> Unix.unix.return (Error `Multiple_occurence_of_provision) in
+let run () a_out provision result =
+  let fiber =
+    fiber0 a_out
+    >>= fun (a_out, _) -> fiber1 a_out provision
+    >>= fun (a_out, _, (vaddr, len)) -> fiber2 a_out vaddr (Int64.of_int len)
+    >>= fun a_out ->
+    let res = Bos.OS.Path.move ~force:true a_out result in
+    Unix.unix.return res in
+  let open Rresult.R in
+  Us.prj fiber >>= fun () ->
+  Fmt.pr "[%a] output ELF binary <%a>.\n%!" Fmt.(styled `Green string) "x" Fpath.pp result ; Ok ()
 
-  match Us.prj (fiber0 a_out
-                >>= fun (a_out, _) -> fiber1 a_out provision
-                >>= fun (a_out, _, (vaddr, len)) -> fiber2 a_out vaddr (Int64.of_int len)) with
-  | Error err -> Fmt.epr "%a\n%!" (pp_error ~pp_source) err
-  | Ok a_out ->
-    match Bos.OS.Path.move ~force:true a_out result with
-    | Ok () -> Fmt.pr ">>> <%a>.\n%!" Fpath.pp result
-    | Error err -> Fmt.epr "%a\n%!" (pp_error ~pp_source) err
+open Cmdliner
+
+let existing_file =
+  let parser x = match Fpath.of_string x with
+    | Ok v -> if Sys.file_exists x then Ok v else Rresult.R.error_msgf "<%a> does not exist" Fpath.pp v
+    | Error _ as err -> err in
+  let pp = Fpath.pp in
+  Arg.conv ~docv:"<file>" (parser, pp)
+
+let existing_directory =
+  let parser x = match Fpath.of_string x with
+    | Ok v -> if Sys.is_directory x then Ok v else Rresult.R.error_msgf "Expected directory <%a>" Fpath.pp v
+    | Error _ as err -> err in
+  let pp = Fpath.pp in
+  Arg.conv ~docv:"<directory>" (parser, pp)
+
+let output_file =
+  let parser x = Fpath.of_string x in
+  let pp = Fpath.pp in
+  Arg.conv ~docv:"<file>" (parser, pp)
+
+let elf_binary =
+  let doc = "Input ELF binary file." in
+  Arg.(required & opt (some existing_file) None & info [ "i"; "input" ] ~doc)
+
+let provision =
+  let doc = "Input provision file." in
+  Arg.(required & opt (some existing_file) None & info [ "p"; "provision" ] ~doc)
+
+let output_file =
+  let doc = "Output ELF binary file." in
+  Arg.(required & pos ~rev:true 0 (some output_file) None & info [] ~doc)
+
+let setup =
+  let style_renderer =
+    let env = Arg.env_var "CARAVAN_COLOR" in
+    Fmt_cli.style_renderer ~docs:Manpage.s_common_options ~env () in
+  let log_level =
+    let env = Arg.env_var "CARAVAN_VERBOSITY" in
+    Logs_cli.level ~docs:Manpage.s_common_options ~env () in
+  let cwd =
+    let doc = "Change directory $(docv) before doing anything." in
+    let docv = "DIR" in
+    Arg.(value & opt (some existing_directory) None & info [ "C"; "cwd" ] ~docs:Manpage.s_common_options ~doc ~docv) in
+  Term.(ret (const setup $ style_renderer $ log_level $ cwd))
+
+let cmd =
+  let doc = "$(tname) inject a new <.provision> section into the given ELF binary file." in
+  let exits = Term.default_exits in
+  let man =
+    [ `S Manpage.s_description
+    ; `P "Generate a new ELF binary file from a given one with a new <.provision> section filled with a given $(i,data) file." ] in
+  Term.(const run $ setup $ elf_binary $ provision $ output_file),
+  Term.info "caravan" ~version:"%%VERSION%%" ~doc ~exits ~man
+
+let () = Term.(exit @@ eval cmd)
