@@ -1,0 +1,35 @@
+opam-version: "2.0"
+name:         "provision"
+maintainer:   [ "Romain Calascibetta <romain.calascibetta@gmail.com>" ]
+authors:      [ "Romain Calascibetta <romain.calascibetta@gmail.com>" ]
+homepage:     "https://github.com/dinosaure/caravan"
+bug-reports:  "https://github.com/dinosaure/caravan/issues"
+dev-repo:     "git+https://github.com/dinosaure/caravan.git"
+doc:          "https://dinosaure.github.io/caravan/"
+license:      "MIT"
+synopsis:     "Section injection into ELF binary file"
+description: """
+Tool to inject new <.provision> section into given ELF binary file.
+"""
+
+build: [ "dune" "build" "-p" name "-j" jobs ]
+run-test: [ "dune" "runtest" "-p" name "-j" jobs ]
+
+depends: [
+  "ocaml"          {>= "4.07.0"}
+  "dune"           {>= "1.9.2"}
+  "base-bytes"
+  "bigstringaf"
+  "fmt"
+]
+
+depopts: [
+  "ocaml-freestanding"
+  "mirage-xen-posix"
+]
+
+conflicts: [
+  "mirage-xen-posix" {< "3.1.0"}
+  "ocaml-freestanding" {< "0.4.1"}
+  "mirage-runtime"{< "4.0.0"}
+]

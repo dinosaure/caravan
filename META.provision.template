@@ -1,0 +1,4 @@
+# DUNE_GEN
+
+xen_linkopts = "-l:xen/libprovision_stubs.a"
+freestanding_linkopts = "-l:freestanding/libprovision_stubs.a"

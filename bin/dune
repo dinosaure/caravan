@@ -1,3 +1,5 @@
 (executable
  (name caravan)
+ (public_name caravan)
+ (package caravan)
  (libraries fmt.cli logs.cli fmt.tty logs.fmt cmdliner bos logs bigstringaf fmt rresult fpath mmap))

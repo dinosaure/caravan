@@ -1,0 +1,12 @@
+(library
+ (name provision_xen)
+ (public_name provision.xen)
+ (optional)
+ (libraries bigstringaf fmt)
+ (c_names load)
+ (c_flags (:include cflags.sexp)))
+
+(rule (copy# ../load.c load.c))
+(rule (copy# ../provision.ml provision.ml))
+
+(rule (with-stdout-to cflags.sexp (run ./cflags.sh)))
