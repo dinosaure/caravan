@@ -1106,6 +1106,7 @@ let inject_new_data_section t ~name:sect_name sh_size (new_pt_load, n_shdr, new_
   let old_e_shoff = t.hdr.e_shoff in
   let ehdr =
     { t.hdr with e_shstrndx= if n_shdr <= t.hdr.e_shstrndx then succ t.hdr.e_shstrndx else t.hdr.e_shstrndx
+               ; e_shnum= succ t.dhr.e_shnum
                ; e_shoff= Int64.(t.hdr.e_shoff + sh_size + (Int64.of_int (Name.length sect_name))) } in
   let open Rresult.R in
   last_pt_load t.pht >>= fun last_pt_load ->
