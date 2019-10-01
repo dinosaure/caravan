@@ -1077,7 +1077,6 @@ let craft_new_data_section t ~name:sect_name sh_size =
       else 0L in
     (* XXX(dinosaure): even if [sh_size] should be equal to 0, (it's a .bss
        section), we fixed it on the previous pass. *)
-    Fmt.epr ">>> vpad: %Lx, ppad: %Lx.\n%!" vpad ppad ;
     let last_sh_size = Int64.(last.sh_size + (rem last.sh_size last.sh_addralign)) in
     let sh_addr = let open Int64 in last.sh_addr + last.sh_size + vpad in
     let sh_offset = let open Int64 in last.sh_offset + last_sh_size + ppad in
@@ -1106,7 +1105,7 @@ let inject_new_data_section t ~name:sect_name sh_size (new_pt_load, n_shdr, new_
   let old_e_shoff = t.hdr.e_shoff in
   let ehdr =
     { t.hdr with e_shstrndx= if n_shdr <= t.hdr.e_shstrndx then succ t.hdr.e_shstrndx else t.hdr.e_shstrndx
-               ; e_shnum= succ t.dhr.e_shnum
+               ; e_shnum= succ t.hdr.e_shnum
                ; e_shoff= Int64.(t.hdr.e_shoff + sh_size + (Int64.of_int (Name.length sect_name))) } in
   let open Rresult.R in
   last_pt_load t.pht >>= fun last_pt_load ->
@@ -1336,7 +1335,7 @@ let fiber0 fpath =
        Rresult.R.map (fun len -> (fpath, len)) res)
     fpath
   |> Rresult.R.join |> Us.inj <* fun () ->
-      Fmt.epr "[%a] BSS section fixed.\n%!" Fmt.(styled `Green string) "x" ;
+      Fmt.pr "[%a] BSS section fixed.\n%!" Fmt.(styled `Green string) "x" ;
       Unix.close src
 
 let fiber1 fpath fpath_provision =
@@ -1358,7 +1357,7 @@ let fiber1 fpath fpath_provision =
         Rresult.R.map (fun len -> (fpath, len, (shdr.sh_addr, stat.U.st_size))) res)
     fpath
   |> Rresult.R.join |> Us.inj <* fun () ->
-      Fmt.epr "[%a] <.provision> section added (virtual addr: %08Lx, len: %d).\n%!" Fmt.(styled `Green string) "x" shdr.sh_addr stat.U.st_size ;
+      Fmt.pr "[%a] <.provision> section added (virtual addr: %08Lx, len: %d).\n%!" Fmt.(styled `Green string) "x" shdr.sh_addr stat.U.st_size ;
       Unix.close src <* fun () -> Unix.close provision
 
 let fiber2 fpath vaddr len =
@@ -1368,7 +1367,7 @@ let fiber2 fpath vaddr len =
     Fmt.pr "[%a] provision occurence found at %08Lx.\n%!" Fmt.(styled `Yellow string) "." occ ;
     Unix.set_int64_be src ~pos:Int64.(occ + 10L) vaddr >>= fun () ->
     Unix.set_int64_be src ~pos:Int64.(occ + 18L) len >>= fun () ->
-    Fmt.epr "[%a] provision value updated.\n%!" Fmt.(styled `Green string) "x" ;
+    Fmt.pr "[%a] provision value updated.\n%!" Fmt.(styled `Green string) "x" ;
     Unix.unix.return (Ok fpath)
   | [] -> Unix.unix.return (Error `No_occurence_of_provision)
   | _ -> Unix.unix.return (Error `Multiple_occurence_of_provision)
