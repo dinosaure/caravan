@@ -1049,6 +1049,17 @@ let size_of_addr ~ehdr = match ei_class_of_e_ident ~e_ident:ehdr.e_ident with
   | ELF_CLASS_64 -> 8L
   | ELF_CLASS_NONE -> Fmt.invalid_arg "Invalid ELF binary"
 
+let shift_sh_link n_shdr shdr = match sh_type_of_shdr shdr with
+  | SHT_DYNAMIC
+  | SHT_HASH
+  | SHT_REL | SHT_RELA
+  | SHT_SYMTAB | SHT_DYNSYM
+  | SHT_OTHER 0x200l ->
+    if shdr.sh_link >= Int32.of_int n_shdr
+    then { shdr with sh_link= Int32.succ shdr.sh_link }
+    else shdr
+  | _ -> shdr
+
 let craft_new_data_section t ~name:sect_name sh_size =
   let open Rresult.R in
   last_pt_load t.pht >>= fun phdr ->
@@ -1135,11 +1146,14 @@ let inject_new_data_section t ~name:sect_name sh_size (new_pt_load, n_shdr, new_
         let off = Int64.add ehdr.e_shoff (Int64.of_int (rn * ehdr.e_shentsize)) in
         let src_off = Int64.add old_e_shoff (Int64.of_int (on * ehdr.e_shentsize)) in
         let len = ehdr.e_shentsize in
+        let shdr = shift_sh_link n_shdr shdr in
 
         if rn = n_shdr
         then
-          let hunk = Bduff.insert ~name:(Name.to_string sect_name) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr new_shdr } in
-          (hunk :: acc, succ rn, on)
+          let new_hunk = Bduff.insert ~name:(Name.to_string sect_name) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr new_shdr } in
+          let old_hunk = Bduff.insert ~name:(Fmt.strf "Section %2d" on) ~off:Int64.(add off (of_int len)) ~len
+              { off= 0L; len; raw= shdr_to_bigstring ~ehdr shdr } in
+          (old_hunk :: new_hunk :: acc, succ (succ rn), (succ on))
         else if rn = ehdr.e_shstrndx
         then (craft_shstrtab ~sh_offset:!shstrtab_sh_offset ~dst_off:off @ acc, succ rn, succ on)
         else if rn > n_shdr
