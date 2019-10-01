@@ -974,7 +974,7 @@ let patch_of_fix_nobits t (n_bss, bss) shifts (ssize, rsize) =
   let hunks_psct1 =
     List.mapi (fun n psct -> match n, psct with
         | _, Section { off; len; name; _ } ->
-          Bduff.copy ?name ~src_off:off ~dst_off:Int64.(off + ssize + rsize) ~len `Binary
+          Bduff.copy ?name ~src_off:off ~dst_off:Int64.(off + rsize + ssize) ~len `Binary
         | _, Zero len -> Bduff.zero len)
       shifts in
   let hunks_psct1 = Bduff.zero Int64.(ssize + rsize) :: hunks_psct1 in
@@ -1060,11 +1060,16 @@ let craft_new_data_section t ~name:sect_name sh_size =
       if Int64.(rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr)) <> 0L
       then let open Int64 in (size_of_addr ~ehdr:t.hdr) - (rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr))
       else 0L in
-    let ppad = Int64.(rem (last.sh_offset + last.sh_size) last.sh_addralign) in
+    let ppad =
+      if Int64.(rem (last.sh_offset + last.sh_size) last.sh_addralign) <> 0L
+      then let open Int64 in last.sh_addralign - (rem (last.sh_offset + last.sh_size) last.sh_addralign)
+      else 0L in
     (* XXX(dinosaure): even if [sh_size] should be equal to 0, (it's a .bss
        section), we fixed it on the previous pass. *)
+    Fmt.epr ">>> vpad: %Lx, ppad: %Lx.\n%!" vpad ppad ;
+    let last_sh_size = Int64.(last.sh_size + (rem last.sh_size last.sh_addralign)) in
     let sh_addr = let open Int64 in last.sh_addr + last.sh_size + vpad in
-    let sh_offset = let open Int64 in last.sh_offset + last.sh_size + ppad in
+    let sh_offset = let open Int64 in last.sh_offset + last_sh_size + ppad in
     let sh_name, _, _ = inject_shstr_name ~name:sect_name t in
     let shdr =
       { sh_name
@@ -1372,9 +1377,10 @@ let run () a_out provision result =
     >>= fun a_out ->
     let res = Bos.OS.Path.move ~force:true a_out result in
     Unix.unix.return res in
-  let open Rresult.R in
-  Us.prj fiber >>= fun () ->
-  Fmt.pr "[%a] output ELF binary <%a>.\n%!" Fmt.(styled `Green string) "x" Fpath.pp result ; Ok ()
+  Us.prj fiber |> function
+  | Ok () ->
+    Fmt.pr "[%a] output ELF binary <%a>.\n%!" Fmt.(styled `Green string) "x" Fpath.pp result ; `Ok ()
+  | Error err -> `Error (false, Fmt.strf "%a" (pp_error ~pp_source) err)
 
 open Cmdliner
 
