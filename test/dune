@@ -1,0 +1,12 @@
+(rule
+ (targets ex01.c.exe)
+ (deps (:provision provision))
+ (action (run %{exe:../bin/caravan.exe} -i %{exe:../example/ex01.exe} -p %{provision} %{targets})))
+
+(rule (with-stdout-to result.output (run %{exe:ex01.c.exe})))
+
+(alias
+ (name runtest)
+ (package caravan)
+ (deps (:output result.output) (:expected result.expected))
+ (action (run diff -uw %{output} %{expected})))
