@@ -1,3 +1,4 @@
 (executable
  (name ex01)
+ (flags (:standard -ccopt -no-pie))
  (libraries hxd.string fmt provision))

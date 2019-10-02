@@ -45,6 +45,7 @@ Then, the status of this project still is experimental.
 ### ASLR
 
 ASLR should be disable on Linux with:
+
 ```sh
 $ echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
 ```
@@ -56,3 +57,8 @@ You can execute your ELF binary with this snippet otherwise:
 ```sh
 $ setarch `uname -m` -R ./my_populated_program
 ```
+
+### PIE
+
+Executable should be compiled without PIE with `-no-pie`. This is currently the case
+on `example/ex01.exe`. Otherwise, addresses move.
