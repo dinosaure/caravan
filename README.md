@@ -41,3 +41,18 @@ can completely alterate behvior of your program. ELF scheme expected is really s
 think to plug in any ELF binary the new `.provision` section.
 
 Then, the status of this project still is experimental.
+
+### ASLR
+
+ASLR should be disable on Linux with:
+```sh
+$ echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
+```
+
+Otherwise, segment which loads `.data` and `.provision` will be moved in a random place.
+At least, randomization of stack and heap should be fine.
+You can execute your ELF binary with this snippet otherwise:
+
+```sh
+$ setarch `uname -m` -R ./my_populated_program
+```
