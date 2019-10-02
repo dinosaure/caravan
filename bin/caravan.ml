@@ -1232,9 +1232,9 @@ module Unix = struct
       Us.inj (Ok { v= { fd; max; }; cache= Window.make (); })
     with _ -> Us.inj (Error (`Invalid_file fpath))
 
-  let rw ~fpath =
+  let rwx ~fpath =
     try
-      let fd = Unix.openfile (Fpath.to_string fpath) Unix.[ O_RDWR ] 0o644 in
+      let fd = Unix.openfile (Fpath.to_string fpath) Unix.[ O_RDWR ] 0o744 in
       let max = let st = Unix.LargeFile.fstat fd in st.Unix.LargeFile.st_size in
       Us.inj (Ok { v= { fd; max; }; cache= Window.make (); })
     with _ -> Us.inj (Error (`Invalid_file fpath))
@@ -1349,7 +1349,7 @@ let fiber1 fpath fpath_provision =
   Fmt.pr "[%a] new <.provision> section (offset: %08Lx, len: %Ld).\n%!" Fmt.(styled `Yellow string) "." shdr.sh_offset shdr.sh_size ;
   inject_new_data_section t ~name (Int64.of_int stat.U.st_size) (phdr, n, shdr, psct) |> Unix.unix.return >>= fun bduff ->
   Bos.OS.File.tmp "a.out-%s" |> Us.inj >>= fun fpath ->
-  Bos.OS.File.with_output fpath
+  Bos.OS.File.with_output ~mode:0o744 fpath
     (fun output fpath ->
         Logs.msg ~src:src_caravan Logs.Info (fun m -> m "Output a.out is %a" Fpath.pp fpath) ;
         let writev = Unix.writev_of_output output in
@@ -1361,7 +1361,7 @@ let fiber1 fpath fpath_provision =
       Unix.close src <* fun () -> Unix.close provision
 
 let fiber2 fpath vaddr len =
-  Unix.rw ~fpath >>= fun src ->
+  Unix.rwx ~fpath >>= fun src ->
   Bm.find_all ~pattern:"PROVISION" Unix.unix ~get:Unix.get ~ln:src.Unix.v.Unix.max src >>= function
   | [ occ ] ->
     Fmt.pr "[%a] provision occurence found at %08Lx.\n%!" Fmt.(styled `Yellow string) "." occ ;
