@@ -1,5 +1,6 @@
 #include <caml/mlvalues.h>
 #include <caml/bigarray.h>
+#include <stdint.h>
 
 CAMLprim value
 caml_load_vaddr_into_bytes(value v_vaddr, value v_buf, value v_off, value v_len)
