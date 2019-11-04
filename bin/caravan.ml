@@ -924,6 +924,8 @@ let fix_nobits_sct t bss psct =
              file offset difference is identical from the section before BSS,
              and BSS. *)
           let diff = let open Int64 in (bss.sh_addr - prev.sh_addr) - (bss.sh_offset - prev.sh_offset) in
+          Fmt.epr ">>> lpad: %08Lx\n%!" lpad ;
+          Fmt.epr ">>> diff: %08Lx\n%!" diff ;
           Int64.sub diff lpad
         else 0L in
       let size1 =
@@ -933,6 +935,7 @@ let fix_nobits_sct t bss psct =
           if next.sh_offset <= Int64.add bss.sh_offset bss.sh_size
           then Int64.sub bss.sh_offset next.sh_offset else 0L
         else 0L in
+      Fmt.epr ">>> %08Lx = %08Lx + %08Lx\n%!" Int64.(size0 + size1) size0 size1 ;
       Int64.(size0 + size1), bss.sh_size
     | _ -> 0L, 0L in
   (n_bss, bss), shifts, ssize, rsize
@@ -1077,9 +1080,18 @@ let craft_new_data_section t ~name:sect_name sh_size =
       else 0L in
     (* XXX(dinosaure): even if [sh_size] should be equal to 0, (it's a .bss
        section), we fixed it on the previous pass. *)
-    let last_sh_size = Int64.(last.sh_size + (rem last.sh_size last.sh_addralign)) in
+    let last_sh_size =
+      Int64.(last.sh_size + (rem last.sh_size last.sh_addralign)) in
+    let lpad =
+      let open Int64 in
+      phdr.p_filesz - (last.sh_offset - phdr.p_offset) - last_sh_size in
+    Fmt.epr "PHDR FILEZ: %08Lx\n%!" phdr.p_filesz ;
+    Fmt.epr "P_OFFSET: %08Lx, SH_OFFSET: %08Lx\n%!" phdr.p_offset last.sh_offset ;
+    Fmt.epr "LPAD: %08Lx\n%!" lpad ;
     let sh_addr = let open Int64 in last.sh_addr + last.sh_size + vpad in
-    let sh_offset = let open Int64 in last.sh_offset + last_sh_size + ppad in
+    Fmt.epr ">>> last.sh_size: %08Lx, last_sh_size: %08Lx.\n%!" last.sh_size last_sh_size ;
+    Fmt.epr ">>> last.sh_offset: %08Lx, last_sh_size: %08Lx, ppad: %08Lx.\n%!" last.sh_offset last_sh_size ppad ;
+    let sh_offset = let open Int64 in last.sh_offset + last_sh_size + lpad in
     let sh_name, _, _ = inject_shstr_name ~name:sect_name t in
     let shdr =
       { sh_name
@@ -1129,6 +1141,7 @@ let inject_new_data_section t ~name:sect_name sh_size (new_pt_load, n_shdr, new_
           Bduff.copy ?name ~src_off:off ~dst_off:off ~len `Binary
         | Zero len -> Bduff.zero len)
       pscts0 in
+  Fmt.epr ">>> @[<hov>%a@]\n%!" Bduff.pp _hunks_psct0s ;
   let shstrtab_sh_offset = ref 0L in
   let _hunks_psct1s =
     List.map (function
@@ -1138,6 +1151,7 @@ let inject_new_data_section t ~name:sect_name sh_size (new_pt_load, n_shdr, new_
           else [ Bduff.copy ?name ~src_off:off ~dst_off:Int64.(off + sh_size) ~len `Binary ]
         | Zero len -> [ Bduff.zero len ])
       shifts |> List.concat in
+  Fmt.epr ">>> %08Lx\n%!" new_shdr.sh_offset ;
   let _new_psct = [ Bduff.copy ~src_off:0L ~dst_off:new_shdr.sh_offset ~name:".provision" ~len:sh_size `Provision ] in
   let _pad_shdr =
     let len = pad_shdr t in if len = 0L then [] else [ Bduff.zero len ] in
@@ -1326,6 +1340,7 @@ let fiber0 fpath =
   let bss, shifts, ssize, rsize = fix_nobits_sct t shdr psct in
   Fmt.pr "[%a] BSS section (offset: %08Lx, len: %Ld).\n%!" Fmt.(styled `Yellow string) "." (snd bss).sh_addr (snd bss).sh_size ;
   patch_of_fix_nobits t bss shifts (ssize, rsize) |> Unix.unix.return >>= fun bduff ->
+  Fmt.epr "@[<hov>%a@]\n%!" Bduff.pp bduff ;
   Bos.OS.File.tmp "a.out-%s" |> Us.inj >>= fun fpath ->
   Bos.OS.File.with_output fpath
     (fun output fpath ->
@@ -1348,6 +1363,7 @@ let fiber1 fpath fpath_provision =
   craft_new_data_section t ~name (Int64.of_int stat.U.st_size) |> Us.inj >>= fun (phdr, n, shdr, psct) ->
   Fmt.pr "[%a] new <.provision> section (offset: %08Lx, len: %Ld).\n%!" Fmt.(styled `Yellow string) "." shdr.sh_offset shdr.sh_size ;
   inject_new_data_section t ~name (Int64.of_int stat.U.st_size) (phdr, n, shdr, psct) |> Unix.unix.return >>= fun bduff ->
+  Fmt.epr "@[<hov>%a@]\n%!" Bduff.pp bduff ;
   Bos.OS.File.tmp "a.out-%s" |> Us.inj >>= fun fpath ->
   Bos.OS.File.with_output ~mode:0o744 fpath
     (fun output fpath ->
@@ -1383,10 +1399,20 @@ let setup style_renderer log_level cwd =
     | Ok () -> `Ok ()
     | Error err -> `Error (false, Fmt.strf "%a" Rresult.R.pp_msg err)
 
+let copy ~src ~dst =
+  Bos.OS.File.with_output dst
+  @@ fun output -> Bos.OS.File.with_input src
+  @@ fun input ->
+  let rec transmit () = match input () with
+    | None -> output None
+    | v -> output v ; transmit () in
+  transmit
+
 let run () a_out provision result =
   let fiber =
     fiber0 a_out
-    >>= fun (a_out, _) -> fiber1 a_out provision
+    >>= fun (a_out, _) -> copy ~src:a_out ~dst:(Fpath.v "a.out.bss") () |> Rresult.R.join |> Us.inj
+    >>= fun () -> fiber1 a_out provision
     >>= fun (a_out, _, (vaddr, len)) -> fiber2 a_out vaddr (Int64.of_int len)
     >>= fun a_out ->
     let res = Bos.OS.Path.move ~force:true a_out result in
@@ -1394,7 +1420,9 @@ let run () a_out provision result =
   Us.prj fiber |> function
   | Ok () ->
     Fmt.pr "[%a] output ELF binary <%a>.\n%!" Fmt.(styled `Green string) "x" Fpath.pp result ; `Ok ()
-  | Error err -> `Error (false, Fmt.strf "%a" (pp_error ~pp_source) err)
+  | Error err ->
+    Fmt.epr "[%a] %a.\n%!" Fmt.(styled `Red string) "ERROR" (pp_error ~pp_source) err ;
+    `Error (false, Fmt.strf "%a" (pp_error ~pp_source) err)
 
 open Cmdliner
 
