@@ -1070,7 +1070,7 @@ let craft_new_data_section t ~name:sect_name sh_size =
   | Zero _ -> Fmt.invalid_arg "Invalid last section of last PT_LOAD segment"
   | Section { shdr= n_last; _ } ->
     let last = List.nth t.sht n_last in
-    let vpad =
+    let _vpad =
       if Int64.(rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr)) <> 0L
       then let open Int64 in (size_of_addr ~ehdr:t.hdr) - (rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr))
       else 0L in
@@ -1088,7 +1088,7 @@ let craft_new_data_section t ~name:sect_name sh_size =
     Fmt.epr "PHDR FILEZ: %08Lx\n%!" phdr.p_filesz ;
     Fmt.epr "P_OFFSET: %08Lx, SH_OFFSET: %08Lx\n%!" phdr.p_offset last.sh_offset ;
     Fmt.epr "LPAD: %08Lx\n%!" lpad ;
-    let sh_addr = let open Int64 in last.sh_addr + last.sh_size + vpad in
+    let sh_addr = let open Int64 in last.sh_addr + last.sh_size (* + vpad *) in
     Fmt.epr ">>> last.sh_size: %08Lx, last_sh_size: %08Lx.\n%!" last.sh_size last_sh_size ;
     Fmt.epr ">>> last.sh_offset: %08Lx, last_sh_size: %08Lx, ppad: %08Lx.\n%!" last.sh_offset last_sh_size ppad ;
     let sh_offset = let open Int64 in last.sh_offset + last_sh_size + lpad in
