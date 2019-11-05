@@ -1,0 +1,27 @@
+(rule
+ (targets filled)
+ (deps (:unikernel _tags config.ml unikernel.ml))
+ (action (progn
+          (run mirage configure -t unix)
+	  (run mirage build))))
+
+(rule
+ (targets filled.hvt)
+ (deps (:unikernel _tags config.ml unikernel.ml))
+ (action (progn
+          (run mirage configure -t hvt)
+	  (run mirage build))))
+
+(rule
+ (targets filled.exe)
+ (deps (:provision provision) (:filled filled))
+ (action (run %{exe:../bin/caravan.exe} -i %{filled} -p %{provision} %{targets})))
+
+(rule
+ (with-stdout-to result.unix.output (run %{exe:filled.exe})))
+
+(alias
+ (name runtest)
+ (package caravan)
+ (deps (:output result.unix.output) (:expected result.expected))
+ (action (run diff -uw %{output} %{expected})))
