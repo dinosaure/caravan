@@ -1,0 +1,2 @@
+<*.cm{o,x}> and not <config.cm{o,x}>: ccopt(-no-pie)
+<*.native> and not <config.native>: ccopt(-no-pie)

@@ -1067,19 +1067,23 @@ let craft_new_data_section t ~name:sect_name sh_size =
   | Zero _ -> Fmt.invalid_arg "Invalid last section of last PT_LOAD segment"
   | Section { shdr= n_last; _ } ->
     let last = List.nth t.sht n_last in
-    let vpad =
+    let _vpad =
       if Int64.(rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr)) <> 0L
       then let open Int64 in (size_of_addr ~ehdr:t.hdr) - (rem (last.sh_addr + last.sh_size) (size_of_addr ~ehdr:t.hdr))
       else 0L in
-    let ppad =
+    let _ppad =
       if Int64.(rem (last.sh_offset + last.sh_size) last.sh_addralign) <> 0L
       then let open Int64 in last.sh_addralign - (rem (last.sh_offset + last.sh_size) last.sh_addralign)
       else 0L in
     (* XXX(dinosaure): even if [sh_size] should be equal to 0, (it's a .bss
        section), we fixed it on the previous pass. *)
-    let last_sh_size = Int64.(last.sh_size + (rem last.sh_size last.sh_addralign)) in
-    let sh_addr = let open Int64 in last.sh_addr + last.sh_size + vpad in
-    let sh_offset = let open Int64 in last.sh_offset + last_sh_size + ppad in
+    let last_sh_size =
+      Int64.(last.sh_size + (rem last.sh_size last.sh_addralign)) in
+    let lpad =
+      let open Int64 in
+      phdr.p_filesz - (last.sh_offset - phdr.p_offset) - last_sh_size in
+    let sh_addr = let open Int64 in last.sh_addr + last.sh_size (* + vpad *) in
+    let sh_offset = let open Int64 in last.sh_offset + last_sh_size + lpad in
     let sh_name, _, _ = inject_shstr_name ~name:sect_name t in
     let shdr =
       { sh_name
@@ -1383,10 +1387,20 @@ let setup style_renderer log_level cwd =
     | Ok () -> `Ok ()
     | Error err -> `Error (false, Fmt.strf "%a" Rresult.R.pp_msg err)
 
+let copy ~src ~dst =
+  Bos.OS.File.with_output dst
+  @@ fun output -> Bos.OS.File.with_input src
+  @@ fun input ->
+  let rec transmit () = match input () with
+    | None -> output None
+    | v -> output v ; transmit () in
+  transmit
+
 let run () a_out provision result =
   let fiber =
     fiber0 a_out
-    >>= fun (a_out, _) -> fiber1 a_out provision
+    >>= fun (a_out, _) -> copy ~src:a_out ~dst:(Fpath.v "a.out.bss") () |> Rresult.R.join |> Us.inj
+    >>= fun () -> fiber1 a_out provision
     >>= fun (a_out, _, (vaddr, len)) -> fiber2 a_out vaddr (Int64.of_int len)
     >>= fun a_out ->
     let res = Bos.OS.Path.move ~force:true a_out result in
@@ -1394,7 +1408,9 @@ let run () a_out provision result =
   Us.prj fiber |> function
   | Ok () ->
     Fmt.pr "[%a] output ELF binary <%a>.\n%!" Fmt.(styled `Green string) "x" Fpath.pp result ; `Ok ()
-  | Error err -> `Error (false, Fmt.strf "%a" (pp_error ~pp_source) err)
+  | Error err ->
+    Fmt.epr "[%a] %a.\n%!" Fmt.(styled `Red string) "ERROR" (pp_error ~pp_source) err ;
+    `Error (false, Fmt.strf "%a" (pp_error ~pp_source) err)
 
 open Cmdliner
 

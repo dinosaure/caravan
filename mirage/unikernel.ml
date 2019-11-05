@@ -1,6 +1,4 @@
-module type PROVISION = sig
-  val provision : Provision.t
-end
+module type PROVISION = sig end
 
 module Make (P : PROVISION) (Console : Mirage_types_lwt.CONSOLE)
 = struct
