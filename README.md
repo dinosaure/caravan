@@ -1,27 +1,29 @@
 ## Caravan
 
-`caravan` is a little software which wants to _inject_ a `.provision` section into given ELF binary file.
-The goal of this program is to plug (in a non conventional way) a section which can be loaded by the binary itself.
-By this way, we are able to not so statically load some extra data to serve then computation of the given program.
+`caravan` is a little software which wants to _inject_ a `.provision` section
+into given ELF binary file. The goal of this program is to plug (in a non
+conventional way) a section which can be loaded by the binary itself. By this
+way, we are able to not so statically load some extra data to serve then
+computation of the given program.
 
-In the way of MirageOS, the idea is to configure and produce an unikernel and deploy an ELF binary file.
-Then, user (with `caravan`) is able to plug some personal informations into the given unikernel and
-run it/virtualize it.
+In the way of MirageOS, the idea is to configure and produce an unikernel and
+deploy an ELF binary file. Then, user (with `caravan`) is able to plug some
+personal informations into the given unikernel and run it/virtualize it - like a
+key, a certificate or any personal data.
 
-## Example
+### Example
 
 ```sh
 $ dune build example/ex01.exe
 $ echo "Hello World!" > provision
 $ dune exec bin/caravan.exe -- -i _build/default/example/ex01.exe -p provision ex01.exe
-$ chmod +x ex01.exe
 $ ./ex01.exe
 00000000: 4865 6c6c 6f20 576f 726c 6421 0a          Hello World!.
 ```
 
-## With MirageOS
+### With MirageOS
 
-Compatible with MirageOS 3 and should be with MirageOS 4:
+Compatible with MirageOS 3.6 and should be with MirageOS 4:
 
 ```sh
 $ cd mirage
@@ -34,31 +36,25 @@ $ ./filled
 9f4e47215a247af1c3d24f7aa33560d637e9389b
 ```
 
-## Caution
+### Caution
 
-`caravan` __injects__ a new section in a non-conventional way. This way is error-prone and an injection
-can completely alterate behvior of your program. ELF scheme expected is really simple. `caravan` was not
-think to plug in any ELF binary the new `.provision` section.
+`caravan` __injects__ a new section in a non-conventional way. This way is
+error-prone and an injection can completely alterate behavior of your program.
+ELF scheme expected is really simple. `caravan` was not think to plug in any ELF
+binary the new `.provision` section.
 
-Then, the status of this project still is experimental.
+Then, the status of this project still is __experimental__.
 
-### ASLR
+In other side, execution of your program MUST respect some assertions:
+- ASLR must be disabled (with `setarch $(uname -m) -R ./filled`)
+- program must be compiled with `-no-pie` option
 
-ASLR should be disable on Linux with:
+### Tests
 
-```sh
-$ echo 0 | sudo tee /proc/sys/kernel/randomize_va_space
-```
+Currently, the distribution provides tests:
+- An injection into an usual UNIX binary
+- An injection into an _unikernel_ to the UNIX target
+- An injection into an _unikernel_ to the Solo5 target
 
-Otherwise, segment which loads `.data` and `.provision` will be moved in a random place.
-At least, randomization of stack and heap should be fine.
-You can execute your ELF binary with this snippet otherwise:
-
-```sh
-$ setarch `uname -m` -R ./my_populated_program
-```
-
-### PIE
-
-Executable should be compiled without PIE with `-no-pie`. This is currently the case
-on `example/ex01.exe`. Otherwise, addresses move.
+Then, all produced binaries was executed and should show something like a SHA1.
+Solo5 target must be executed into a computer with KVM.
