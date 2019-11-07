@@ -27,3 +27,22 @@ caml_load_vaddr_into_bigstring(value v_vaddr, value v_buf, value v_off, value v_
 
   return Val_unit;
 }
+
+#include <caml/memory.h>
+#include <caml/bigarray.h>
+
+CAMLprim value
+caml_map_vaddr(value v_vaddr, value v_len)
+{
+  CAMLparam2(v_vaddr, v_len);
+  CAMLlocal1(res);
+
+  intnat dim[CAML_BA_MAX_NUM_DIMS];
+  uint64_t vaddr = Int64_val (v_vaddr);
+  int len = Long_val(v_len);
+
+  dim[0] = len;
+  res = caml_ba_alloc(CAML_BA_UINT8 | CAML_BA_C_LAYOUT | CAML_BA_EXTERNAL, 1, (uint8_t *) vaddr, dim);
+
+  CAMLreturn(res);
+}
