@@ -1,8 +1,8 @@
 module type PROVISION = sig end
 
-module Make (P : PROVISION) (Console : Mirage_types_lwt.CONSOLE)
+module Make (_ : PROVISION) (Console : Mirage_console.S)
 = struct
-  let log console fmt = Fmt.kstrf (Console.log console) fmt
+  let log console fmt = Fmt.kstr (Console.log console) fmt
 
   let start provision console =
     let len = Provision.length provision in

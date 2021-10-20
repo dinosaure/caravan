@@ -9,4 +9,4 @@ let () =
   let map = Provision.map_bigstring p ~off:0 ~len in
   let res = Bytes.unsafe_to_string buf in
   assert (String.equal (Bigstringaf.to_string map) res) ;
-  Fmt.pr "@[<hov>%a@]\n%!" (Hxd_string.pp Hxd.O.default) res
+  Fmt.pr "@[<hov>%a@]\n%!" (Hxd_string.pp Hxd.default) res
