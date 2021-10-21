@@ -1196,8 +1196,8 @@ module Unix = struct
     let max = 1024 * 1024
     let maxl = Int64.of_int max
 
-    let heavy_load { fd; max; } cache ~pos ~len =
-      let lenl = min Int64.(max - pos) maxl in
+    let heavy_load { fd; max= mmax; } cache ~pos ~len =
+      let lenl = min Int64.(mmax - pos) maxl in
 
       if Int64.of_int len > lenl
       then Us.inj (Error (`Invalid_bounds { pos; len; }))
