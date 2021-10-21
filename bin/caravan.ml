@@ -962,7 +962,7 @@ let patch_of_fix_nobits t (n_bss, bss) shifts (ssize, rsize) =
          then
            let phdr = { phdr with p_filesz= Int64.(phdr.p_filesz + ssize + rsize) } in
            Bduff.insert ~name:"Segment of BSS" ~off ~len { off= 0L; len; raw= phdr_to_bigstring ~ehdr phdr }
-         else Bduff.copy ~name:(Fmt.strf "Segment %2d" i) ~src_off:off ~dst_off:off ~len:(Int64.of_int len) `Binary)
+         else Bduff.copy ~name:(Fmt.str "Segment %2d" i) ~src_off:off ~dst_off:off ~len:(Int64.of_int len) `Binary)
       t.pht in
   let pscts0 = pscts_of_offset ~sh_offset:bss.sh_offset t |> fst in
   let hunks_psct0 =
@@ -988,8 +988,8 @@ let patch_of_fix_nobits t (n_bss, bss) shifts (ssize, rsize) =
         if n = n_bss then Bduff.insert ~name:".bss" ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr bss }
         else if n > n_bss then
           let shdr = shift_shdr ~shift:Int64.(ssize + rsize) shdr in
-          Bduff.insert ~name:(Fmt.strf "Section %2d" n) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr shdr }
-        else Bduff.copy ~name:(Fmt.strf "Section %2d" n) ~src_off ~dst_off:off ~len:(Int64.of_int len) `Binary)
+          Bduff.insert ~name:(Fmt.str "Section %2d" n) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr shdr }
+        else Bduff.copy ~name:(Fmt.str "Section %2d" n) ~src_off ~dst_off:off ~len:(Int64.of_int len) `Binary)
       t.sht in
   Ok (hunk_ehdr :: hunks_phdr @ hunks_psct0 @ hunks_psct1 @ pad_shdr @ hunks_shdr)
 
@@ -1123,7 +1123,7 @@ let inject_new_data_section t ~name:sect_name sh_size (new_pt_load, n_shdr, new_
 
          if phdr_equal phdr last_pt_load
          then Bduff.insert ~name:"Segment of injection" ~off ~len { off= 0L; len; raw= phdr_to_bigstring ~ehdr new_pt_load }
-         else Bduff.copy ~name:(Fmt.strf "Segment %2d" i) ~src_off:off ~dst_off:off ~len:(Int64.of_int len) `Binary)
+         else Bduff.copy ~name:(Fmt.str "Segment %2d" i) ~src_off:off ~dst_off:off ~len:(Int64.of_int len) `Binary)
       t.pht in
   let pscts0, shifts = pscts_of_offset ~sh_offset:new_shdr.sh_offset t in
   (* XXX(dinosaure): assume that .shstrtab is __after__ [shdr]. *)
@@ -1155,7 +1155,7 @@ let inject_new_data_section t ~name:sect_name sh_size (new_pt_load, n_shdr, new_
         if rn = n_shdr
         then
           let new_hunk = Bduff.insert ~name:(Name.to_string sect_name) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr new_shdr } in
-          let old_hunk = Bduff.insert ~name:(Fmt.strf "Section %2d" on) ~off:Int64.(add off (of_int len)) ~len
+          let old_hunk = Bduff.insert ~name:(Fmt.str "Section %2d" on) ~off:Int64.(add off (of_int len)) ~len
               { off= 0L; len; raw= shdr_to_bigstring ~ehdr shdr } in
           (old_hunk :: new_hunk :: acc, succ (succ rn), (succ on))
         else if rn = ehdr.e_shstrndx
@@ -1163,10 +1163,10 @@ let inject_new_data_section t ~name:sect_name sh_size (new_pt_load, n_shdr, new_
         else if rn > n_shdr
         then
           let shdr = shift_shdr ~shift:sh_size shdr in
-          let hunk = Bduff.insert ~name:(Fmt.strf "Section %2d" on) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr shdr } in
+          let hunk = Bduff.insert ~name:(Fmt.str "Section %2d" on) ~off ~len { off= 0L; len; raw= shdr_to_bigstring ~ehdr shdr } in
           (hunk :: acc, succ rn, succ on)
         else
-          let hunk = Bduff.copy ~name:(Fmt.strf "Section %2d" on) ~src_off ~dst_off:off ~len:(Int64.of_int len) `Binary in
+          let hunk = Bduff.copy ~name:(Fmt.str "Section %2d" on) ~src_off ~dst_off:off ~len:(Int64.of_int len) `Binary in
           (hunk :: acc, succ rn, succ on))
       ([], 0, 0) t.sht |> fun (lst, _, _) -> List.rev lst in
   let hunks = _hunk_ehdr :: _hunks_phdr @ _hunks_psct0s @ _new_psct @ _hunks_psct1s @ _pad_shdr @ _hunks_shdr in
@@ -1196,8 +1196,8 @@ module Unix = struct
     let max = 1024 * 1024
     let maxl = Int64.of_int max
 
-    let heavy_load { fd; max; } cache ~pos ~len =
-      let lenl = min Int64.(max - pos) maxl in
+    let heavy_load { fd; max= mmax; } cache ~pos ~len =
+      let lenl = min Int64.(mmax - pos) maxl in
 
       if Int64.of_int len > lenl
       then Us.inj (Error (`Invalid_bounds { pos; len; }))
@@ -1385,7 +1385,7 @@ let setup style_renderer log_level cwd =
   | Some dir ->
     match Bos.OS.Dir.set_current dir with
     | Ok () -> `Ok ()
-    | Error err -> `Error (false, Fmt.strf "%a" Rresult.R.pp_msg err)
+    | Error err -> `Error (false, Fmt.str "%a" Rresult.R.pp_msg err)
 
 let copy ~src ~dst =
   Bos.OS.File.with_output dst
@@ -1410,7 +1410,7 @@ let run () a_out provision result =
     Fmt.pr "[%a] output ELF binary <%a>.\n%!" Fmt.(styled `Green string) "x" Fpath.pp result ; `Ok ()
   | Error err ->
     Fmt.epr "[%a] %a.\n%!" Fmt.(styled `Red string) "ERROR" (pp_error ~pp_source) err ;
-    `Error (false, Fmt.strf "%a" (pp_error ~pp_source) err)
+    `Error (false, Fmt.str "%a" (pp_error ~pp_source) err)
 
 open Cmdliner
 

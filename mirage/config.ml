@@ -25,12 +25,12 @@ let provision =
     method! packages =
       Key.pure [ package "provision" ]
     method! connect _ modname _ =
-      Fmt.strf "return (%s.provision)" modname
-    method! clean info =
+      Fmt.str "return (%s.provision)" modname
+    method! clean _info =
       Bos.OS.File.delete Fpath.(v name + "ml")
-    method! build info =
-      let contents = Fmt.strf "let provision = Provision.unsafe_of_string \
-                               \"PROVISION_\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\"" in
+    method! build _info =
+      let contents = Fmt.str "let provision = Provision.unsafe_of_string \
+                              \"PROVISION_\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\"" in
       let output_string oc v = output_string oc v ; Ok () in
       let res = Bos.OS.File.with_oc Fpath.(v name + "ml") output_string contents in
       Rresult.R.join res
