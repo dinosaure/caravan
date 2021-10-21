@@ -21,7 +21,9 @@ depends: [
   "base-bytes"
   "base-unix"
   "bigstringaf"
-  "fmt"
+  "fmt"            {>= "0.8.7"}
+  "hxd"            {with-test & >= "0.3.1"}
+  "fpath"
   "bos"
   "logs"
   "rresult"
